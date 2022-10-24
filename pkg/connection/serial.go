@@ -39,12 +39,6 @@ type SerialConnection struct {
 func (ss *SerialConnection) Listen() {
 	// Starts scanning provided connection for tokens
 	// This method is intended to be run in a separate goroutine
-	if ss.DataChan == nil {
-		ss.DataChan = make(chan []byte, 1)
-	}
-	if ss.errChan == nil {
-		ss.errChan = make(chan error, 1)
-	}
 	defer func() {
 		close(ss.errChan)
 		close(ss.DataChan)

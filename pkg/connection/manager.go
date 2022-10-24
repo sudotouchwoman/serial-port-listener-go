@@ -12,10 +12,11 @@ import (
 
 type connHandler struct {
 	*SerialConnection
-	writer   chan []byte
-	connName string
-	closed   bool
-	close    func() error
+	writer    chan []byte
+	connName  string
+	closed    bool
+	closeHook func() error
+	closure   func()
 }
 
 func (handle *connHandler) ID() string {
@@ -36,8 +37,9 @@ func (handle *connHandler) Close() error {
 	if handle.closed {
 		return ErrAlreadyClosed
 	}
+	handle.closure()
 	handle.closed = true
-	return handle.close()
+	return handle.closeHook()
 }
 
 func (handle *connHandler) Writer() chan<- []byte {
@@ -46,10 +48,15 @@ func (handle *connHandler) Writer() chan<- []byte {
 	}
 	handle.writer = make(chan []byte)
 	go func() {
-		for d := range handle.writer {
-			_, err := handle.SerialConnection.Write(d)
-			if err != nil {
-				handle.errChan <- err
+		for {
+			select {
+			case d := <-handle.writer:
+				_, err := handle.SerialConnection.Write(d)
+				if err != nil {
+					handle.errChan <- err
+				}
+			case <-handle.SerialConnection.Context.Done():
+				return
 			}
 		}
 	}()
@@ -108,9 +115,13 @@ func (cm *ConnectionManager) Open(name string) (common.DuplexProducer, error) {
 		handler := &connHandler{
 			connName:         name,
 			SerialConnection: conn,
-			close: func() error {
+			closure: func() {
 				ctxCancel()
 				canceler()
+			},
+			closeHook: func() error {
+				cm.lock.Lock()
+				defer cm.lock.Unlock()
 				return cm.closerFunc(name)
 			},
 		}
@@ -132,7 +143,7 @@ func (cm *ConnectionManager) Close(name string) error {
 		return ErrConnNotOpened
 	}
 	delete(cm.pool, name)
-	connection.Close()
+	connection.closure()
 	// check if something went wrong with the connection
 	// and propagate the error if any
 	// use select to avoid unnesessary blocks
@@ -145,8 +156,6 @@ func (cm *ConnectionManager) Close(name string) error {
 }
 
 func (cm *ConnectionManager) closerFunc(name string) error {
-	cm.lock.Lock()
-	defer cm.lock.Unlock()
 	connection, open := cm.pool[name]
 	if !open {
 		return ErrConnNotOpened
