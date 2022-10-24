@@ -10,7 +10,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/gorilla/websocket"
-	"github.com/sudotouchwoman/serial-port-listener-go/pkg/client"
 	"github.com/sudotouchwoman/serial-port-listener-go/pkg/common"
 )
 
@@ -19,7 +18,7 @@ type ClientConsumer struct {
 	// interface and can thus be used with
 	// ConsumerManager. ListenerServer stores
 	// a map of all clients just in case
-	*client.Client
+	Socket     *websocket.Conn
 	Token      string
 	socketChan chan []byte
 }
@@ -33,14 +32,6 @@ func (c *ClientConsumer) Reciever() common.RecieverChan {
 		return c.socketChan
 	}
 	c.socketChan = make(chan []byte)
-	go func() {
-		for update := range c.socketChan {
-			err := c.Send(0, update)
-			if err != nil {
-				log.Println(err)
-			}
-		}
-	}()
 	return c.socketChan
 }
 
@@ -64,7 +55,7 @@ func (ls *ListenerServer) SocketHandler(w http.ResponseWriter, r *http.Request) 
 	// create new consumer struct to store websocket
 	// and u4 token
 	c := &ClientConsumer{
-		Client:     client.New(conn),
+		Socket:     conn,
 		Token:      uuid.NewString(),
 		socketChan: make(chan []byte),
 	}
@@ -75,7 +66,12 @@ func (ls *ListenerServer) SocketHandler(w http.ResponseWriter, r *http.Request) 
 	// redirect them into the websocket
 	go func() {
 		for update := range c.socketChan {
-			if err := c.Client.Send(0, update); err != nil {
+			msg, wrapErr := ls.messageWrapper(c, update)
+			if wrapErr != nil {
+				go log.Println("Error on message wrap:", wrapErr, " Client:", c.Token)
+				continue
+			}
+			if err := c.Socket.WriteMessage(0, msg); err != nil {
 				// is it okay to log in a goroutine?
 				go log.Println("Error on send to ws:", err, " Client:", c.Token)
 			}
@@ -87,8 +83,8 @@ func (ls *ListenerServer) SocketHandler(w http.ResponseWriter, r *http.Request) 
 		if err := conn.Close(); err != nil {
 			log.Println("Error during closing websocket", err)
 		}
-		delete(ls.clients, c)
 		ls.subs.DropConsumer(c)
+		delete(ls.clients, c)
 	}()
 	// starts listening for messages via websocket
 	// client initiates activity by selecting the serial port to listen to
@@ -111,18 +107,18 @@ func (ls *ListenerServer) SocketHandler(w http.ResponseWriter, r *http.Request) 
 }
 
 func (ls *ListenerServer) HandleSocketMessage(c *ClientConsumer, payload []byte) {
-	msg := client.Message{}
+	msg := SockRequest{}
 	if err := json.Unmarshal(payload, &msg); err != nil {
 		log.Println("Failed to decode ws message:", err)
 		return
 	}
-	if msg.MType == client.MsgPort {
-		msgPort := client.MessagePort{}
+	if msg.MType == MsgPort {
+		msgPort := MessagePort{}
 		if err := json.Unmarshal(msg.Payload, &msgPort); err != nil {
 			log.Println("Failed to decode port message:", err)
 			return
 		}
-		if msgPort.Action == client.OpenPort {
+		if msgPort.Action == OpenPort {
 			conn, err := ls.conns.Open(msgPort.Serial)
 			if err != nil {
 				// handle error, send formatted message to user
@@ -133,4 +129,12 @@ func (ls *ListenerServer) HandleSocketMessage(c *ClientConsumer, payload []byte)
 		}
 		return
 	}
+}
+
+func (ls *ListenerServer) messageWrapper(c *ClientConsumer, data []byte) (msg []byte, err error) {
+	response := SockResponse{
+		Body: string(data),
+	}
+	msg, err = json.Marshal(response)
+	return
 }
