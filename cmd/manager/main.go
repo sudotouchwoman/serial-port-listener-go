@@ -48,9 +48,8 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	go conn.Listen()
 
-	for data := range conn.DataChan {
+	for data := range conn.Data() {
 		log.Println(string(data))
 	}
 	log.Println("Finished probing")

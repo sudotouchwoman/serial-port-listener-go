@@ -8,17 +8,26 @@ import (
 )
 
 type Client struct {
-	// serials this client is listening to
-	Token     string
-	Socket    *websocket.Conn
-	WriteLock *sync.Mutex
+	Socket *websocket.Conn
+	mu     *sync.Mutex
 }
 
-func New(token string, conn *websocket.Conn) *Client {
+func (c *Client) Send(mtype int, msg []byte) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.Socket.WriteMessage(mtype, msg)
+}
+
+func (c *Client) SendJSON(msg interface{}) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.Socket.WriteJSON(msg)
+}
+
+func New(conn *websocket.Conn) *Client {
 	return &Client{
-		Token:     token,
-		Socket:    conn,
-		WriteLock: &sync.Mutex{},
+		Socket: conn,
+		mu:     &sync.Mutex{},
 	}
 }
 
@@ -37,16 +46,4 @@ type Message struct {
 type MessagePort struct {
 	Serial string `json:"serial"`
 	Action string `json:"action"`
-}
-
-func (c *Client) Send(mtype int, msg []byte) error {
-	c.WriteLock.Lock()
-	defer c.WriteLock.Unlock()
-	return c.Socket.WriteMessage(mtype, msg)
-}
-
-func (c *Client) SendJSON(msg interface{}) error {
-	c.WriteLock.Lock()
-	defer c.WriteLock.Unlock()
-	return c.Socket.WriteJSON(msg)
 }

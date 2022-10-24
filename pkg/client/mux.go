@@ -2,24 +2,28 @@ package client
 
 import (
 	"context"
+
+	"github.com/sudotouchwoman/serial-port-listener-go/pkg/common"
 )
 
-type ConsumerProvider func() []chan<- []byte
+type ConsumerProvider func() []common.RecieverChan
 
 func Broadcast(
+	ctx context.Context,
 	producer <-chan []byte,
 	provider ConsumerProvider,
-	ctx context.Context,
 ) {
+	// wait for updates or until the channels gets closed
+	// this function is intended to be run in a separate gorourine
 	for {
 		select {
-		case update, closed := <-producer:
+		case update, open := <-producer:
 			for _, target := range provider() {
 				go func(t chan<- []byte) {
 					t <- update
 				}(target)
 			}
-			if closed {
+			if !open {
 				return
 			}
 		case <-ctx.Done():

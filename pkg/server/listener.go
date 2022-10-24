@@ -5,18 +5,52 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"sync"
+
+	"github.com/google/uuid"
 
 	"github.com/gorilla/websocket"
 	"github.com/sudotouchwoman/serial-port-listener-go/pkg/client"
-	"github.com/sudotouchwoman/serial-port-listener-go/pkg/connection"
+	"github.com/sudotouchwoman/serial-port-listener-go/pkg/common"
 )
 
+type ClientConsumer struct {
+	// this struct implements Consumer
+	// interface and can thus be used with
+	// ConsumerManager. ListenerServer stores
+	// a map of all clients just in case
+	*client.Client
+	Token      string
+	socketChan chan []byte
+}
+
+func (c *ClientConsumer) ID() string {
+	return c.Token
+}
+
+func (c *ClientConsumer) Reciever() common.RecieverChan {
+	if c.socketChan != nil {
+		return c.socketChan
+	}
+	c.socketChan = make(chan []byte)
+	go func() {
+		for update := range c.socketChan {
+			err := c.Send(0, update)
+			if err != nil {
+				log.Println(err)
+			}
+		}
+	}()
+	return c.socketChan
+}
+
 type ListenerServer struct {
+	mu       *sync.RWMutex
 	ctx      context.Context
 	upgrader websocket.Upgrader
-	conns    *connection.ConnectionManager
-	subs     *client.SubscriptionManager
-	clients  map[*client.Client]bool
+	conns    common.ProducerManager
+	subs     common.ConsumerManager
+	clients  map[*ClientConsumer]bool
 }
 
 func (ls *ListenerServer) SocketHandler(w http.ResponseWriter, r *http.Request) {
@@ -27,12 +61,34 @@ func (ls *ListenerServer) SocketHandler(w http.ResponseWriter, r *http.Request) 
 		log.Println("Error during connection upgrade:", err)
 		return
 	}
-	var c *client.Client = nil
-	// create client object
-	// and remember to close the connection once done
+	// create new consumer struct to store websocket
+	// and u4 token
+	c := &ClientConsumer{
+		Client:     client.New(conn),
+		Token:      uuid.NewString(),
+		socketChan: make(chan []byte),
+	}
+	ls.mu.Lock()
+	ls.clients[c] = true
+	ls.mu.Unlock()
+	// listen for updates and
+	// redirect them into the websocket
+	go func() {
+		for update := range c.socketChan {
+			if err := c.Client.Send(0, update); err != nil {
+				// is it okay to log in a goroutine?
+				go log.Println("Error on send to ws:", err, " Client:", c.Token)
+			}
+		}
+	}()
+	// remember to close channels and connections once done
 	defer func() {
-		conn.Close()
-		ls.subs.DropClient(c)
+		close(c.socketChan)
+		if err := conn.Close(); err != nil {
+			log.Println("Error during closing websocket", err)
+		}
+		delete(ls.clients, c)
+		ls.subs.DropConsumer(c)
 	}()
 	// starts listening for messages via websocket
 	// client initiates activity by selecting the serial port to listen to
@@ -40,15 +96,21 @@ func (ls *ListenerServer) SocketHandler(w http.ResponseWriter, r *http.Request) 
 	// but this can be handled before ws connection is established via middlewares
 	// TODO: once nobody is listening to a serial port, it should be closed
 	for {
-		_, _, readErr := conn.ReadMessage()
-		if readErr != nil {
-			log.Println("Client Disconnected: ", readErr)
+		select {
+		case <-ls.ctx.Done():
+			return
+		default:
+			_, message, readErr := conn.ReadMessage()
+			if readErr != nil {
+				log.Println("Client Disconnected: ", readErr)
+				return
+			}
+			ls.HandleSocketMessage(c, message)
 		}
 	}
-	// do connection-specific things
 }
 
-func (ls *ListenerServer) HandleSocketMessage(c *client.Client, payload []byte) {
+func (ls *ListenerServer) HandleSocketMessage(c *ClientConsumer, payload []byte) {
 	msg := client.Message{}
 	if err := json.Unmarshal(payload, &msg); err != nil {
 		log.Println("Failed to decode ws message:", err)
@@ -60,7 +122,6 @@ func (ls *ListenerServer) HandleSocketMessage(c *client.Client, payload []byte) 
 			log.Println("Failed to decode port message:", err)
 			return
 		}
-		portOpened := ls.conns.IsOpen(msgPort.Serial)
 		if msgPort.Action == client.OpenPort {
 			conn, err := ls.conns.Open(msgPort.Serial)
 			if err != nil {
@@ -68,40 +129,8 @@ func (ls *ListenerServer) HandleSocketMessage(c *client.Client, payload []byte) 
 				log.Println(err)
 				return
 			}
-			ls.subs.Subscribe(c, client.Producer(msgPort.Serial))
-			// start listening to connection
-			// data will be stored in conn.DataChan
-			// also start reading from the connection
-			if !portOpened {
-				// go client.Broadcast(conn.DataChan, func() []chan<- []byte {
-				// 	// checks for clients listening to this port
-				// 	listeners := ls.subs.GetListeners(client.Producer(msgPort.Serial))
-				// 	if len(listeners) == 0 {
-				// 		return []chan<- []byte{}
-				// 	}
-				// 	for c := range
-				// }, ls.ctx)
-				go conn.Listen()
-			}
+			ls.subs.Subscribe(c, conn)
 		}
+		return
 	}
-}
-
-func (ls *ListenerServer) HandleSerialRequest(c *client.Client, p client.Producer) {
-	// open the port or respond with an error on failure
-	// ...
-	// if _, ok := c.Subscriptions[name]; ok {
-	// 	// client already subscribed, nothing to do
-	// 	return
-	// }
-	// this serial port is already opened (and listened to)
-	// client should get subscribed to updates then
-	// if ls.conns.IsOpen(name) {
-	// 	return
-	// }
-	// if port, err := ls.serials.Open(name); err == nil {
-	// 	c.Subscriptions[name] = true
-	// 	// like this? user
-	// 	go port.Listen()
-	// }
 }
