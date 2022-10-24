@@ -23,25 +23,32 @@ type ConnectionManager struct {
 	// in order to ease tesing
 	// (e.g. to avoid actual interaction with serial connections)
 	context.Context
-	*sync.Mutex
+	lock     *sync.RWMutex
 	pool     map[string]connHandler
 	provider ConnectionProvider
 }
 
 func NewManager(ctx context.Context, p ConnectionProvider) *ConnectionManager {
 	return &ConnectionManager{
-		Mutex:    &sync.Mutex{},
+		lock:     &sync.RWMutex{},
 		pool:     map[string]connHandler{},
 		Context:  ctx,
 		provider: p,
 	}
 }
 
+func (cm *ConnectionManager) IsOpen(name string) bool {
+	cm.lock.RLock()
+	defer cm.lock.RUnlock()
+	_, open := cm.pool[name]
+	return open
+}
+
 func (cm *ConnectionManager) Open(name string) (*SerialConnection, error) {
 	// Return new connection, creating one along the way if it does not exist yet.
 	// Propagates errors from provider
-	cm.Lock()
-	defer cm.Unlock()
+	cm.lock.Lock()
+	defer cm.lock.Unlock()
 	if connection, open := cm.pool[name]; open {
 		return connection.SerialConnection, nil
 	}
@@ -70,8 +77,8 @@ func (cm *ConnectionManager) Open(name string) (*SerialConnection, error) {
 var ErrConnNotOpened = errors.New("connection does not exist")
 
 func (cm *ConnectionManager) Close(name string) error {
-	cm.Lock()
-	defer cm.Unlock()
+	cm.lock.Lock()
+	defer cm.lock.Unlock()
 	connection, open := cm.pool[name]
 	if !open {
 		return ErrConnNotOpened
