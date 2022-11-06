@@ -166,22 +166,21 @@ func TestConnectionManager_Writing(t *testing.T) {
 		"serial-port-to-buffer-mapping": 0,
 	}
 	type fields struct {
-		Context  context.Context
 		provider ConnectionProvider
 	}
 	type args struct {
 		name string
 	}
 	tests := []struct {
-		name    string
-		fields  fields
-		args    args
-		wantErr bool
+		name              string
+		fields            fields
+		args              args
+		wantErr           bool
+		managerClosesConn bool
 	}{
 		{
 			name: "Mock provider with string io",
 			fields: fields{
-				Context:  context.Background(),
 				provider: GetMockProvider(words),
 			},
 			args: args{name: "short-msg"},
@@ -189,18 +188,45 @@ func TestConnectionManager_Writing(t *testing.T) {
 		{
 			name: "Closing from manager side",
 			fields: fields{
-				Context:  context.Background(),
 				provider: GetMockProvider(words),
 			},
-			args: args{name: "serial-port-to-buffer-mapping"},
+			args:              args{name: "serial-port-to-buffer-mapping"},
+			managerClosesConn: true,
+		},
+		{
+			name: "Closing from connection side",
+			fields: fields{
+				provider: GetMockProvider(words),
+			},
+			args:              args{name: "unexpected-msg"},
+			wantErr:           true,
+			managerClosesConn: true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cm := NewManager(tt.fields.Context, tt.fields.provider)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			cm := NewManager(ctx, tt.fields.provider)
 			cm.Open(tt.args.name)
 			// pick from cache once again
 			got, err := cm.Open(tt.args.name)
+
+			// properly close the connection
+			// check for possible errors
+			defer func() {
+				var err error = nil
+				if tt.managerClosesConn || got == nil {
+					err = cm.Close(tt.args.name)
+				} else {
+					err = got.Close()
+				}
+				if err != nil && !tt.wantErr {
+					t.Error(err)
+				}
+			}()
+
 			if (err != nil) != tt.wantErr {
 				t.Errorf("ConnectionManager.Open() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -215,6 +241,9 @@ func TestConnectionManager_Writing(t *testing.T) {
 				t.Errorf("ConnectionManager.Open() got nil Provider but wantErr is false")
 				return
 			}
+			if got == nil {
+				return
+			}
 			tokens := strings.Split(tt.args.name, "-")
 			log.Println(tokens)
 			for _, token := range tokens {
@@ -227,7 +256,10 @@ func TestConnectionManager_Writing(t *testing.T) {
 			// everything was indeed written to the buffer
 			// but asking the builder asynchronously might be
 			// dangerous as handler might be still processing the writer!
-			<-got.Err()
+			cancel()
+			if err = <-got.Err(); err != nil {
+				t.Error("unexpected error:", err)
+			}
 			// got serial10, want serial101
 			if buffer, ok := got.(*connHandler).SerialConnection.ReadWriter.(*StringBuffer); ok {
 				expectedInBuf := strings.Join(tokens, "")

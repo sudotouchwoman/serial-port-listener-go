@@ -32,7 +32,6 @@ func TestSerialConnection_Listen(t *testing.T) {
 		name   string
 		fields fields
 	}{
-		// TODO: Add test cases.
 		{
 			name: "Listening for updates from string",
 			fields: fields{
@@ -75,19 +74,19 @@ func TestSerialConnection_Listen(t *testing.T) {
 				errChan:    make(chan error, 1),
 			}
 			go ss.Listen()
-			for word := range ss.DataChan {
-				wordStr, ExpectedWord := string(word), tt.fields.ExpectedRead[i]
+			for _, expectedWord := range tt.fields.ExpectedRead {
+				gotWord, open := <-ss.DataChan
 				i++
-				if wordStr == ExpectedWord {
+				if !open {
+					t.Error("data chan closed unexpectedly, was waiting for", expectedWord)
+				}
+				if string(gotWord) == expectedWord {
 					continue
 				}
-				t.Errorf("reading from serial error. want = %v, got= %v", wordStr, ExpectedWord)
+				t.Errorf("reading from serial error. want = %v, got= %v", gotWord, expectedWord)
 			}
-			if err := <-ss.errChan; err != nil {
-				t.Errorf(err.Error())
-			}
-			if _, open := <-ss.errChan; open {
-				t.Error("expected SerialConnection.errChan to be closed by now")
+			if err, open := <-ss.errChan; open && err != nil {
+				t.Error("expected SerialConnection.errChan to be closed by now. err=", err)
 			}
 		})
 	}
