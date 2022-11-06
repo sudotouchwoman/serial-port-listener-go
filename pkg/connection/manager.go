@@ -97,11 +97,17 @@ func (cm *ConnectionManager) IsOpen(name string) bool {
 func (cm *ConnectionManager) Open(name string) (common.DuplexProducer, error) {
 	// Return new connection, creating one along the way if it does not exist yet.
 	// Propagates errors from provider
-	cm.lock.Lock()
-	defer cm.lock.Unlock()
+	cm.lock.RLock()
 	if connection, open := cm.pool[name]; open {
+		cm.lock.RUnlock()
 		return connection, nil
 	}
+	cm.lock.RUnlock()
+	// subtle optimization: there might be many concurrent
+	// calls to the same producer, which is already opened
+	// RLock utilization might be proficient
+	cm.lock.Lock()
+	defer cm.lock.Unlock()
 	wr, canceler, err := cm.provider(name)
 	if err == nil && wr != nil {
 		ctx, ctxCancel := context.WithCancel(cm)

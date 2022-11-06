@@ -13,35 +13,47 @@ import (
 	"github.com/sudotouchwoman/serial-port-listener-go/pkg/common"
 )
 
+type Client interface {
+	common.Consumer
+	Updates() common.UpdatesChan
+}
+
 type ClientConsumer struct {
 	// this struct implements Consumer
 	// interface and can thus be used with
 	// ConsumerManager. ListenerServer stores
 	// a map of all clients just in case
-	Socket     *websocket.Conn
-	Token      string
-	socketChan chan []byte
+	token       string
+	updatesChan chan []byte
 }
 
 func (c *ClientConsumer) ID() string {
-	return c.Token
+	return c.token
 }
 
 func (c *ClientConsumer) Reciever() common.RecieverChan {
-	if c.socketChan != nil {
-		return c.socketChan
+	return c.updatesChan
+}
+
+func (c *ClientConsumer) Updates() common.UpdatesChan {
+	return c.updatesChan
+}
+
+func NewClientConsumer() Client {
+	return &ClientConsumer{
+		token:       uuid.NewString(),
+		updatesChan: make(chan []byte),
 	}
-	c.socketChan = make(chan []byte)
-	return c.socketChan
 }
 
 type ListenerServer struct {
-	mu       *sync.RWMutex
-	ctx      context.Context
-	upgrader websocket.Upgrader
-	conns    common.ProducerManager
-	subs     common.ConsumerManager
-	clients  map[*ClientConsumer]bool
+	mu            *sync.RWMutex
+	ctx           context.Context
+	upgrader      websocket.Upgrader
+	conns         common.ProducerManager
+	subs          common.ConsumerManager
+	clients       map[Client]bool
+	clientFactory func() Client
 }
 
 func (ls *ListenerServer) SocketHandler(w http.ResponseWriter, r *http.Request) {
@@ -50,41 +62,41 @@ func (ls *ListenerServer) SocketHandler(w http.ResponseWriter, r *http.Request) 
 	conn, err := ls.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Println("Error during connection upgrade:", err)
+		http.Error(w, "Failed to upgrade connection", 422)
 		return
 	}
 	// create new consumer struct to store websocket
 	// and u4 token
-	c := &ClientConsumer{
-		Socket:     conn,
-		Token:      uuid.NewString(),
-		socketChan: make(chan []byte),
-	}
+	c := ls.clientFactory()
 	ls.mu.Lock()
 	ls.clients[c] = true
 	ls.mu.Unlock()
 	// listen for updates and
 	// redirect them into the websocket
 	go func() {
-		for update := range c.socketChan {
-			msg, wrapErr := ls.messageWrapper(c, update)
-			if wrapErr != nil {
-				go log.Println("Error on message wrap:", wrapErr, " Client:", c.Token)
+		for update := range c.Updates() {
+			// wrap messages into a json response
+			msg, errMsgWrap := ls.messageWrapper(c, update)
+			if errMsgWrap != nil {
+				go log.Println("Error on message wrap:", errMsgWrap, " Client:", c.ID())
 				continue
 			}
-			if err := c.Socket.WriteMessage(0, msg); err != nil {
+			if errWrite := conn.WriteMessage(0, msg); errWrite != nil {
 				// is it okay to log in a goroutine?
-				go log.Println("Error on send to ws:", err, " Client:", c.Token)
+				go log.Println("Error on send to ws:", errWrite, " Client:", c.ID())
 			}
 		}
 	}()
 	// remember to close channels and connections once done
 	defer func() {
-		close(c.socketChan)
+		close(c.Reciever())
 		if err := conn.Close(); err != nil {
 			log.Println("Error during closing websocket", err)
 		}
 		ls.subs.DropConsumer(c)
+		ls.mu.Lock()
 		delete(ls.clients, c)
+		ls.mu.Unlock()
 	}()
 	// starts listening for messages via websocket
 	// client initiates activity by selecting the serial port to listen to
@@ -106,7 +118,7 @@ func (ls *ListenerServer) SocketHandler(w http.ResponseWriter, r *http.Request) 
 	}
 }
 
-func (ls *ListenerServer) HandleSocketMessage(c *ClientConsumer, payload []byte) {
+func (ls *ListenerServer) HandleSocketMessage(c Client, payload []byte) {
 	msg := SockRequest{}
 	if err := json.Unmarshal(payload, &msg); err != nil {
 		log.Println("Failed to decode ws message:", err)
@@ -122,16 +134,45 @@ func (ls *ListenerServer) HandleSocketMessage(c *ClientConsumer, payload []byte)
 			conn, err := ls.conns.Open(msgPort.Serial)
 			if err != nil {
 				// handle error, send formatted message to user
+				// refactoring idea: wrap the error here,
+				// avoid parsing on upper levels
+				c.Reciever() <- []byte(err.Error())
 				log.Println(err)
 				return
 			}
+			// subscribe and inform the user
 			ls.subs.Subscribe(c, conn)
+			c.Reciever() <- []byte("subscribed to producer:" + msgPort.Serial)
+			return
 		}
+		if msgPort.Action == ClosePort {
+			if !ls.conns.IsOpen(msgPort.Serial) {
+				// this one wasn't opened in the first place
+				c.Reciever() <- []byte("this producer is inactive:" + msgPort.Serial)
+				return
+			}
+			// still have to call this method, as
+			// the producer is not stored anywhere except
+			// the manager
+			conn, err := ls.conns.Open(msgPort.Serial)
+			if err != nil {
+				c.Reciever() <- []byte(err.Error())
+				log.Println(err)
+				return
+			}
+			// unsubscribe
+			ls.subs.Unsubscribe(c, conn)
+			c.Reciever() <- []byte("unsubscribed from producer:" + msgPort.Serial)
+			return
+		}
+		c.Reciever() <- []byte("unknown action")
+		log.Println("Unknown action for port request:", msgPort)
 		return
 	}
+	// handle other types of messages
 }
 
-func (ls *ListenerServer) messageWrapper(c *ClientConsumer, data []byte) (msg []byte, err error) {
+func (ls *ListenerServer) messageWrapper(c Client, data []byte) (msg []byte, err error) {
 	response := SockResponse{
 		Body: string(data),
 	}

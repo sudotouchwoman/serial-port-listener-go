@@ -21,6 +21,7 @@ type ProducerManager interface {
 }
 
 type RecieverChan chan<- []byte
+type UpdatesChan <-chan []byte
 
 type Consumer interface {
 	ID() string
