@@ -24,7 +24,7 @@ type ClientConsumer struct {
 	// ConsumerManager. ListenerServer stores
 	// a map of all clients just in case
 	token       string
-	updatesChan chan []byte
+	updatesChan chan interface{}
 }
 
 func (c *ClientConsumer) ID() string {
@@ -42,7 +42,7 @@ func (c *ClientConsumer) Updates() common.UpdatesChan {
 func NewClientConsumer() Client {
 	return &ClientConsumer{
 		token:       uuid.NewString(),
-		updatesChan: make(chan []byte),
+		updatesChan: make(chan interface{}),
 	}
 }
 
@@ -76,12 +76,8 @@ func (ls *ListenerServer) SocketHandler(w http.ResponseWriter, r *http.Request) 
 	go func() {
 		for update := range c.Updates() {
 			// wrap messages into a json response
-			msg, errMsgWrap := ls.messageWrapper(c, update)
-			if errMsgWrap != nil {
-				go log.Println("Error on message wrap:", errMsgWrap, " Client:", c.ID())
-				continue
-			}
-			if errWrite := conn.WriteMessage(0, msg); errWrite != nil {
+			// and fire
+			if errWrite := conn.WriteJSON(update); errWrite != nil {
 				// is it okay to log in a goroutine?
 				go log.Println("Error on send to ws:", errWrite, " Client:", c.ID())
 			}
@@ -170,12 +166,4 @@ func (ls *ListenerServer) HandleSocketMessage(c Client, payload []byte) {
 		return
 	}
 	// handle other types of messages
-}
-
-func (ls *ListenerServer) messageWrapper(c Client, data []byte) (msg []byte, err error) {
-	response := SockResponse{
-		Body: string(data),
-	}
-	msg, err = json.Marshal(response)
-	return
 }

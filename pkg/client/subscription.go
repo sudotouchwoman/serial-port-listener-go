@@ -96,6 +96,7 @@ func (sm *SubscriptionManager) Subscribe(c common.Consumer, p common.Producer) {
 		// start broadcasting updates
 		go Broadcast(
 			sm.ctx,
+			p.ID(),
 			p.Data(),
 			func() []common.RecieverChan {
 				return sm.GetRecievers(p)

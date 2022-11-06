@@ -20,8 +20,8 @@ type ProducerManager interface {
 	Close(string) error
 }
 
-type RecieverChan chan<- []byte
-type UpdatesChan <-chan []byte
+type RecieverChan chan<- interface{}
+type UpdatesChan <-chan interface{}
 
 type Consumer interface {
 	ID() string

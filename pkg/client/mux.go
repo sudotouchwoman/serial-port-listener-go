@@ -8,8 +8,14 @@ import (
 
 type ConsumerProvider func() []common.RecieverChan
 
+type BroadcastedMessage struct {
+	Text       string `json:"text"`
+	ProducerID string `json:"producer_id"`
+}
+
 func Broadcast(
 	ctx context.Context,
+	producerID string,
 	producer <-chan []byte,
 	provider ConsumerProvider,
 ) {
@@ -18,9 +24,14 @@ func Broadcast(
 	for {
 		select {
 		case update, open := <-producer:
+			emission := BroadcastedMessage{
+				Text:       string(update),
+				ProducerID: producerID,
+			}
 			for _, target := range provider() {
-				go func(t chan<- []byte) {
-					t <- update
+				go func(t common.RecieverChan) {
+					// emit a marshallable message
+					t <- emission
 				}(target)
 			}
 			if !open {
