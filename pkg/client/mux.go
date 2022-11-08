@@ -42,3 +42,25 @@ func Broadcast(
 		}
 	}
 }
+
+func GeneralBroadcast(
+	ctx context.Context,
+	producer common.UpdatesChan,
+	provider ConsumerProvider) {
+	for {
+		select {
+		case update, open := <-producer:
+			for _, target := range provider() {
+				go func(t common.RecieverChan) {
+					// emit a marshallable message
+					t <- update
+				}(target)
+			}
+			if !open {
+				return
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
+}

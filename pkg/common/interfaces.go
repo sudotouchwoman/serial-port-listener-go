@@ -31,10 +31,9 @@ type Consumer interface {
 type Producer DuplexProducer
 type Consumers []Consumer
 
-type ConsumerManager interface {
+type SubscriptionManager interface {
 	IsSub(Consumer, Producer) bool
 	GetListeners(Producer) Consumers
-	GetRecievers() []RecieverChan
 	Subscribe(Consumer, Producer)
 	Unsubscribe(Consumer, Producer)
 	DropConsumer(Consumer)

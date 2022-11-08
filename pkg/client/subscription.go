@@ -2,34 +2,31 @@ package client
 
 import (
 	"context"
+	"log"
 	"sync"
 
 	"github.com/sudotouchwoman/serial-port-listener-go/pkg/common"
 )
 
-type closer func(common.Producer)
 type links map[common.Consumer]bool
 
-type SubscriptionManager struct {
-	// Manages state of subscriptions
-	// Asks external service to close producer
-	// in case it is not requested by
-	// clients anymore
+// Manages state of subscriptions
+// Asks external service to close producer
+// in case it is not requested by
+// clients anymore.
+type ConsumerManager struct {
 	ctx       context.Context
-	mu        *sync.RWMutex
+	mu        sync.RWMutex
 	listeners map[common.Producer]links
-	closer
 }
 
-func NewManager(c closer) *SubscriptionManager {
-	return &SubscriptionManager{
-		mu:        &sync.RWMutex{},
+func NewManager() *ConsumerManager {
+	return &ConsumerManager{
 		listeners: map[common.Producer]links{},
-		closer:    c,
 	}
 }
 
-func (sm *SubscriptionManager) IsSub(c common.Consumer, p common.Producer) bool {
+func (sm *ConsumerManager) IsSub(c common.Consumer, p common.Producer) bool {
 	// Checks whether given client is subscribed for given producer
 	if c == nil {
 		return false
@@ -44,7 +41,7 @@ func (sm *SubscriptionManager) IsSub(c common.Consumer, p common.Producer) bool 
 	return ok
 }
 
-func (sm *SubscriptionManager) GetListeners(p common.Producer) common.Consumers {
+func (sm *ConsumerManager) GetListeners(p common.Producer) common.Consumers {
 	// Checks all clients subscribed for given producer
 	// is intended to for usage with broadcaster
 	// to check targets to send data to
@@ -61,7 +58,7 @@ func (sm *SubscriptionManager) GetListeners(p common.Producer) common.Consumers 
 	return listenters
 }
 
-func (sm *SubscriptionManager) GetRecievers(p common.Producer) []common.RecieverChan {
+func (sm *ConsumerManager) recievers(p common.Producer) []common.RecieverChan {
 	// Checks all clients subscribed for given producer
 	// is intended to for usage with broadcaster
 	// to check targets to send data to
@@ -81,7 +78,7 @@ func (sm *SubscriptionManager) GetRecievers(p common.Producer) []common.Reciever
 	return consumers
 }
 
-func (sm *SubscriptionManager) Subscribe(c common.Consumer, p common.Producer) {
+func (sm *ConsumerManager) Subscribe(c common.Consumer, p common.Producer) {
 	// Subscribes common.Consumer c to updates from
 	// common.Producer p. In case given producer does not
 	// exist yet, start broadcasting its updates
@@ -99,7 +96,7 @@ func (sm *SubscriptionManager) Subscribe(c common.Consumer, p common.Producer) {
 			p.ID(),
 			p.Data(),
 			func() []common.RecieverChan {
-				return sm.GetRecievers(p)
+				return sm.recievers(p)
 			},
 		)
 		return
@@ -108,26 +105,30 @@ func (sm *SubscriptionManager) Subscribe(c common.Consumer, p common.Producer) {
 	producer[c] = true
 }
 
-func (sm *SubscriptionManager) Unsubscribe(c common.Consumer, p common.Producer) {
+func (sm *ConsumerManager) Unsubscribe(c common.Consumer, p common.Producer) {
 	// code duplication in nil checks sucks
 	if c == nil || p == nil {
 		return
 	}
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	if producer, ok := sm.listeners[p]; ok {
-		delete(producer, c)
+	if producerLinks, ok := sm.listeners[p]; ok {
+		delete(producerLinks, c)
 		// close the producer if there is nobody left
 		// listening
 		// this should also stop the broadcasting goroutine
 		// created in Subscribe
-		if len(producer) == 0 {
-			go sm.closer(p)
+		if len(producerLinks) == 0 {
+			go func() {
+				if err := p.Close(); err != nil {
+					log.Println("Error on Producer.Close():", err)
+				}
+			}()
 		}
 	}
 }
 
-func (sm *SubscriptionManager) DropConsumer(c common.Consumer) {
+func (sm *ConsumerManager) DropConsumer(c common.Consumer) {
 	// unsubscribes given common.Consumer c from updates
 	// from each of producers
 	if c == nil {
