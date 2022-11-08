@@ -7,8 +7,6 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/google/uuid"
-
 	"github.com/gorilla/websocket"
 	"github.com/sudotouchwoman/serial-port-listener-go/pkg/common"
 )
@@ -39,38 +37,68 @@ func (c *ClientConsumer) Updates() common.UpdatesChan {
 	return c.updatesChan
 }
 
-func NewClientConsumer() Client {
+func NewClientConsumer(id string) Client {
 	return &ClientConsumer{
-		token:       uuid.NewString(),
+		token:       id,
 		updatesChan: make(chan interface{}),
 	}
 }
 
 type ListenerServer struct {
-	mu            *sync.RWMutex
-	ctx           context.Context
-	upgrader      websocket.Upgrader
-	conns         common.ProducerManager
-	subs          common.ConsumerManager
-	clients       map[Client]bool
-	clientFactory func() Client
+	mu             sync.RWMutex
+	ctx            context.Context
+	upgrader       websocket.Upgrader
+	conns          common.ProducerManager
+	subs           common.ConsumerManager
+	clientSessions map[Client]int
+	clients        map[string]Client
+	clientFactory  func(id string) Client
 }
 
 func (ls *ListenerServer) SocketHandler(w http.ResponseWriter, r *http.Request) {
+	// check if this user is currently connected
+	// from somewhere else
+	clientID, foundInCtx := r.Context().Value(common.ClientIDKey).(string)
+	if !foundInCtx {
+		// essentially, auth error
+		// client id should be passed externally
+		http.Error(w, "Must be logged in to proceed", http.StatusForbidden)
+		return
+	}
+	// try to pick up client from the storage
+	var c Client = nil
+	ls.mu.RLock()
+	if _, clientFound := ls.clients[clientID]; !clientFound {
+		ls.mu.RUnlock()
+		// new user might have connected:
+		// create a corresponding entry
+		c = ls.clientFactory(clientID)
+		ls.mu.Lock()
+		ls.clientSessions[c]++
+		ls.clients[clientID] = c
+		ls.mu.Unlock()
+	} else {
+		// this is a bit messy due to Go's
+		// variable scopes. By this moment goroutine still
+		// holds the Read lock thus the following line is legal
+		// we have to explicitly RUnlock() in the main branch though
+		// as it should be followed by a Write-locking operation
+		c = ls.clients[clientID]
+		ls.mu.RUnlock()
+	}
 	// upgrades HTTP connection to a WS one
 	ls.upgrader.CheckOrigin = func(r *http.Request) bool { return true }
 	conn, err := ls.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Println("Error during connection upgrade:", err)
-		http.Error(w, "Failed to upgrade connection", 422)
+		http.Error(w, "Failed to upgrade connection", http.StatusUnprocessableEntity)
 		return
 	}
-	// create new consumer struct to store websocket
-	// and u4 token
-	c := ls.clientFactory()
-	ls.mu.Lock()
-	ls.clients[c] = true
-	ls.mu.Unlock()
+	defer func() {
+		if err := conn.Close(); err != nil {
+			log.Println("Error during closing websocket", err)
+		}
+	}()
 	// listen for updates and
 	// redirect them into the websocket
 	go func() {
@@ -79,20 +107,24 @@ func (ls *ListenerServer) SocketHandler(w http.ResponseWriter, r *http.Request) 
 			// and fire
 			if errWrite := conn.WriteJSON(update); errWrite != nil {
 				// is it okay to log in a goroutine?
-				go log.Println("Error on send to ws:", errWrite, " Client:", c.ID())
+				go log.Println("Error on send to ws:", errWrite, " Client:", clientID)
 			}
 		}
 	}()
 	// remember to close channels and connections once done
 	defer func() {
 		close(c.Reciever())
-		if err := conn.Close(); err != nil {
-			log.Println("Error during closing websocket", err)
-		}
-		ls.subs.DropConsumer(c)
+		// only drop this client
+		// if the last connection is being closed
+		// (one might like to still listen to updates
+		// in another tab or whatever)
 		ls.mu.Lock()
-		delete(ls.clients, c)
-		ls.mu.Unlock()
+		ls.clientSessions[c]--
+		if ls.clientSessions[c] == 0 {
+			delete(ls.clientSessions, c)
+			ls.mu.Unlock()
+			ls.subs.DropConsumer(c)
+		}
 	}()
 	// starts listening for messages via websocket
 	// client initiates activity by selecting the serial port to listen to
@@ -166,4 +198,5 @@ func (ls *ListenerServer) HandleSocketMessage(c Client, payload []byte) {
 		return
 	}
 	// handle other types of messages
+	log.Println("Unknown request type:", msg)
 }

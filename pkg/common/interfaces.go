@@ -39,3 +39,7 @@ type ConsumerManager interface {
 	Unsubscribe(Consumer, Producer)
 	DropConsumer(Consumer)
 }
+
+type CtxKey string
+
+const ClientIDKey CtxKey = "clientID"
